@@ -1,61 +1,76 @@
 const express = require('express');
-const m3u8 = require('m3u8');
-const httpProxy = require('http-proxy-middleware');
-const url = require('url');
+const M3U8Parser = require('m3u8-parser');  // Pacote correto
+const https = require('https');
+const http = require('http');
+const urlModule = require('url');
 
 const app = express();
 const port = process.env.PORT || 10000;
 
-// Middleware pra proxy de arquivos estáticos e streams
-app.use('/proxy', httpProxy.createProxyMiddleware({
-  target: 'http://example.com',  // Placeholder — o target vem via query
-  changeOrigin: true,
-  pathRewrite: {
-    '^/proxy': '',  // Remove /proxy do path
-  },
-  onProxyReq: (proxyReq, req, res) => {
-    const targetUrl = req.query.url;
-    if (targetUrl) {
-      proxyReq.path = url.parse(targetUrl).path;
-    }
-  }
-}));
-
-// Endpoint principal pra proxy M3U8/HLS
-app.get('/?url=*', (req, res) => {
+// Endpoint principal: /?url=TARGET_URL (proxy pra M3U8 ou streams)
+app.get('/', (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res.status(400).send('Missing ?url= parameter');
+    return res.status(400).send('Missing ?url= parameter. Use: /?url=https://example.com/playlist.m3u8');
   }
 
-  // Fetch e reescreve M3U8 se for manifesto
-  const https = require('https');
-  const http = require('http');
-  const client = targetUrl.startsWith('https') ? https : http;
+  const isHttps = targetUrl.startsWith('https');
+  const client = isHttps ? https : http;
+  const parsedTarget = urlModule.parse(targetUrl);
 
-  client.get(targetUrl, (resp) => {
+  const options = {
+    hostname: parsedTarget.hostname,
+    port: parsedTarget.port || (isHttps ? 443 : 80),
+    path: parsedTarget.path,
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; HLS-Proxy/1.0)'
+    }
+  };
+
+  const proxyReq = client.request(options, (proxyRes) => {
     let data = '';
-    resp.on('data', (chunk) => data += chunk);
-    resp.on('end', () => {
-      if (resp.headers['content-type'] && resp.headers['content-type'].includes('m3u8')) {
-        // Parse e reescreve URLs relativas pra proxy
-        const parser = m3u8.create();
+    proxyRes.on('data', (chunk) => { data += chunk; });
+    proxyRes.on('end', () => {
+      const contentType = proxyRes.headers['content-type'] || '';
+      if (contentType.includes('m3u8') || contentType.includes('mpegurl')) {
+        // Parse e reescreve o manifesto M3U8 pra usar o proxy em sub-URLs
+        const parser = new M3U8Parser.Parser();
         parser.push(data);
         parser.end();
-        const rewritten = parser.manifest.toString().replace(/(https?:\/\/[^\/\s]+)/g, (match) => {
-          return `${req.protocol}://${req.get('host')}/proxy?url=${encodeURIComponent(match + '$&')}`;
-        });
+        const manifest = parser.manifest;
+
+        // Reescreve URIs relativas/absolutas pra apontar pro proxy
+        if (manifest.segments) {
+          manifest.segments.forEach(segment => {
+            if (segment.uri) {
+              segment.uri = `${req.protocol}://${req.get('host')}/?url=${encodeURIComponent(targetUrl)}&segment=${encodeURIComponent(segment.uri)}`;
+            }
+          });
+        }
+        if (manifest.playlists) {
+          manifest.playlists.forEach(playlist => {
+            if (playlist.uri) {
+              playlist.uri = `${req.protocol}://${req.get('host')}/?url=${encodeURIComponent(targetUrl)}&playlist=${encodeURIComponent(playlist.uri)}`;
+            }
+          });
+        }
+
         res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        res.send(rewritten);
+        res.send(JSON.stringify(manifest, null, 2));  // Ou use uma lib pra stringify M3U8 se precisar
       } else {
-        // Stream direto (pra .ts segments)
-        res.set('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+        // Stream direto pra .ts ou outros arquivos binários
+        res.set('Content-Type', contentType || 'application/octet-stream');
         res.send(data);
       }
     });
-  }).on('error', (err) => {
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error('Proxy error:', err);
     res.status(500).send('Proxy error: ' + err.message);
   });
+  proxyReq.end();
 });
 
 app.listen(port, () => {
