@@ -1,14 +1,14 @@
 {
   "name": "hls-proxy",
   "version": "1.0.0",
-  "description": "Node.js server to proxy HLS video streams",
+  "description": "Proxy HLS para IPTV sem CORS",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "m3u8-parser": "^7.2.0"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
     "node": ">=18.0.0"
